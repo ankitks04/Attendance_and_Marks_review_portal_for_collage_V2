@@ -22,6 +22,15 @@ document.addEventListener('DOMContentLoaded', () => {
   loadCurrentPageData();
 });
 
+function isStudentUser() {
+  return state.currentUser && state.currentUser.role === 'student';
+}
+
+function getCurrentStudentId() {
+  if (!isStudentUser()) return null;
+  return state.currentUser.student_id || 1;
+}
+
 function initUserSession() {
   const userStr = localStorage.getItem('currentUser');
   let user = null;
@@ -63,6 +72,12 @@ function initUserSession() {
       const subtitle = document.querySelector('.banner-content p');
       if (subtitle) {
         subtitle.innerHTML = `Welcome back, <strong>${escapeHtml(user.name)}</strong>! Viewing your academic performance & attendance portfolio (View-Only Mode).`;
+      }
+      // Mandatory first-time password change prompt
+      if (user.must_change_password) {
+        setTimeout(() => {
+          openModal('modalChangePassword');
+        }, 350);
       }
     }
   }
@@ -175,12 +190,94 @@ function loadCurrentPageData() {
 // -------------------------------------------------------------
 async function fetchDashboardData() {
   try {
-    const res = await fetch('/api/dashboard');
+    let dashboardUrl = '/api/dashboard';
+    if (isStudentUser()) {
+      const params = new URLSearchParams();
+      if (state.currentUser?.name) params.set('student_name', state.currentUser.name);
+      if (state.currentUser?.student_code) params.set('student_code', state.currentUser.student_code);
+      if (state.currentUser?.student_id) params.set('student_id', state.currentUser.student_id);
+      const qs = params.toString();
+      if (qs) dashboardUrl += '?' + qs;
+    }
+
+    const res = await fetch(dashboardUrl);
     const json = await res.json();
     if (!json.success) return;
 
     state.dashboardData = json.data;
     const { overview, trends, gradeDistribution, subjectPerformance, atRiskStudents, recentActivities } = json.data;
+
+    // Student Login: Show only own portfolio data
+    if (isStudentUser()) {
+      const sId = getCurrentStudentId();
+      let stuData = null;
+      try {
+        const sRes = await fetch(`/api/students/${sId}`);
+        const sJson = await sRes.json();
+        if (sJson.success) stuData = sJson.data;
+      } catch (e) {}
+
+      const hasAtt = (stuData?.attendanceSummary?.total || 0) > 0;
+      const hasMarks = (stuData?.marksSummary?.totalMax || 0) > 0;
+      const myAtt = hasAtt ? stuData.attendanceSummary.percentage : 0;
+      const myMarks = hasMarks ? stuData.marksSummary.percentage : 0;
+      const isRisk = (hasAtt && myAtt < 75) || (hasMarks && myMarks < 50);
+
+      // 4 Top Statistic Cards for Student
+      const totalStudentsEl = document.getElementById('statTotalStudents');
+      if (totalStudentsEl) {
+        totalStudentsEl.innerText = '1';
+        const footerSpan = totalStudentsEl.parentElement?.querySelector('.stat-footer span:last-child');
+        if (footerSpan) footerSpan.innerText = state.currentUser.course ? `${state.currentUser.course} (Enrolled)` : 'Active Student';
+      }
+
+      const avgAttEl = document.getElementById('statAvgAttendance');
+      if (avgAttEl) avgAttEl.innerText = `${myAtt}%`;
+
+      const avgMarksEl = document.getElementById('statAvgMarks');
+      if (avgMarksEl) avgMarksEl.innerText = `${myMarks}%`;
+
+      const riskEl = document.getElementById('statStudentsAtRisk');
+      if (riskEl) {
+        riskEl.innerText = isRisk ? '1' : '0';
+        const footerSpan = riskEl.parentElement?.querySelector('.stat-footer span:last-child');
+        if (footerSpan) footerSpan.innerText = isRisk ? 'Attendance < 75% or Marks < 50%' : 'Academic Standing: Good';
+      }
+
+      // Sidebar badge
+      const badge = document.getElementById('sidebarRiskBadge');
+      if (badge) badge.innerText = isRisk ? 'At Risk' : 'Good Standing';
+
+      // Charts (if rendered/visible)
+      if (trends && trends.length > 0) {
+        renderAttendanceTrendChart('chartAttendanceTrend', trends);
+      }
+      if (subjectPerformance && subjectPerformance.length > 0) {
+        renderSubjectPerformanceChart('chartSubjectPerformance', subjectPerformance);
+      }
+      if (gradeDistribution) {
+        renderMarksDistributionChart('chartMarksDistribution', gradeDistribution);
+      }
+
+      // At-risk table: only show current student if at risk
+      const myAtRisk = (atRiskStudents || []).filter(s => s.id === sId || s.student_code === state.currentUser.student_code || (state.currentUser.name && s.name === state.currentUser.name));
+      renderDashboardAtRiskTable(myAtRisk);
+
+      // Recent activities: filter strictly to activities involving ONLY this student
+      const myName = (state.currentUser.name || '').trim().toLowerCase();
+      const myCode = (state.currentUser.student_code || '').trim().toLowerCase();
+      const myUser = (state.currentUser.username || '').trim().toLowerCase();
+      const myActivities = (recentActivities || []).filter(a => {
+        const desc = (a.description || '').toLowerCase();
+        const matchesName = myName && desc.includes(myName);
+        const matchesCode = myCode && desc.includes(myCode);
+        const matchesUser = myUser && myUser !== 'student' && (desc.includes(`(${myUser})`) || desc.includes(`"${myUser}"`));
+        return Boolean(matchesName || matchesCode || matchesUser);
+      });
+      renderRecentActivitiesTable(myActivities);
+
+      return;
+    }
 
     // 4 Top Statistic Cards
     document.getElementById('statTotalStudents').innerText = overview.totalStudents || 0;
@@ -219,8 +316,9 @@ function renderDashboardAtRiskTable(students) {
   if (!tbody) return;
 
   if (!students || students.length === 0) {
+    const msg = isStudentUser() ? 'You are in good standing! No academic risk detected.' : 'All students are in good standing! No academic risk detected.';
     tbody.innerHTML = `<tr><td colspan="5" style="text-align:center; padding: 24px; color: var(--green-text);">
-      <div style="font-weight: 600;">All students are in good standing! No academic risk detected.</div>
+      <div style="font-weight: 600;">${msg}</div>
     </td></tr>`;
     return;
   }
@@ -293,6 +391,15 @@ async function fetchStudents() {
     if (!json.success) return;
 
     state.students = json.data;
+
+    // Student Login: Show only own record
+    if (isStudentUser()) {
+      const sId = getCurrentStudentId();
+      const sCode = state.currentUser.student_code;
+      const sName = state.currentUser.name;
+      state.students = (state.students || []).filter(s => s.id === sId || (sCode && s.student_code === sCode) || (sName && s.name === sName));
+    }
+
     renderStudentsTable(state.students);
 
     // Populate student dropdowns in marks/attendance modals
@@ -380,17 +487,33 @@ async function fetchAttendance() {
     const semester = document.getElementById('attSemesterFilter')?.value || 'All';
     const date = document.getElementById('attDateFilter')?.value || '';
 
-    const url = `/api/attendance?course=${encodeURIComponent(course)}&semester=${encodeURIComponent(semester)}&date=${encodeURIComponent(date)}`;
+    let url = `/api/attendance?course=${encodeURIComponent(course)}&semester=${encodeURIComponent(semester)}&date=${encodeURIComponent(date)}`;
+    if (isStudentUser()) {
+      url += `&student_id=${encodeURIComponent(getCurrentStudentId())}`;
+    }
+
     const res = await fetch(url);
     const json = await res.json();
     if (!json.success) return;
 
     state.attendanceRecords = json.records || [];
     state.studentSummary = json.studentSummary || [];
+    let shortageList = json.shortageList || [];
+
+    // Student Login: Show only own attendance data
+    if (isStudentUser()) {
+      const sId = getCurrentStudentId();
+      const sCode = state.currentUser.student_code;
+      const sName = state.currentUser.name;
+
+      state.studentSummary = (state.studentSummary || []).filter(s => s.student_id === sId || (sCode && s.student_code === sCode) || (sName && s.name === sName));
+      state.attendanceRecords = (state.attendanceRecords || []).filter(r => r.student_id === sId || (sCode && r.student_code === sCode) || (sName && r.student_name === sName));
+      shortageList = (shortageList || []).filter(s => s.student_id === sId || (sCode && s.student_code === sCode) || (sName && s.name === sName));
+    }
 
     renderAttendanceSummaryTable(state.studentSummary);
     renderAttendanceLogTable(state.attendanceRecords);
-    renderAttendanceShortageList(json.shortageList || []);
+    renderAttendanceShortageList(shortageList);
   } catch (err) {
     console.error('Error fetching attendance:', err);
   }
@@ -474,8 +597,9 @@ function renderAttendanceShortageList(shortage) {
   if (!container) return;
 
   if (shortage.length === 0) {
+    const msg = isStudentUser() ? '✓ Excellent! Your attendance meets the 75% mandatory attendance threshold. No shortage detected.' : '✓ Excellent! No students are currently under the 75% mandatory attendance threshold.';
     container.innerHTML = `<div style="padding: 16px; background-color: var(--green-subtle); border-radius: var(--radius-md); color: var(--green-text); font-weight: 600;">
-      ✓ Excellent! No students are currently under the 75% mandatory attendance threshold.
+      ${msg}
     </div>`;
     return;
   }
@@ -525,7 +649,10 @@ function renderAttendanceShortageList(shortage) {
 // -------------------------------------------------------------
 async function fetchMarks() {
   try {
-    const studentId = document.getElementById('marksStudentFilter')?.value || '';
+    let studentId = document.getElementById('marksStudentFilter')?.value || '';
+    if (isStudentUser()) {
+      studentId = getCurrentStudentId();
+    }
     const subject = document.getElementById('marksSubjectFilter')?.value || 'All';
     const examType = document.getElementById('marksExamFilter')?.value || 'All';
     const threshold = state.passingThreshold;
@@ -536,6 +663,15 @@ async function fetchMarks() {
     if (!json.success) return;
 
     state.marksRecords = json.data;
+
+    // Student Login: Show only own marks records
+    if (isStudentUser()) {
+      const sId = getCurrentStudentId();
+      const sCode = state.currentUser.student_code;
+      const sName = state.currentUser.name;
+      state.marksRecords = (state.marksRecords || []).filter(m => m.student_id === sId || (sCode && m.student_code === sCode) || (sName && m.student_name === sName));
+    }
+
     renderMarksTable(state.marksRecords);
   } catch (err) {
     console.error('Error fetching marks:', err);
@@ -727,13 +863,15 @@ async function handleAddStudentSubmit(e) {
     name: document.getElementById('addStuName').value.trim(),
     email: document.getElementById('addStuEmail').value.trim(),
     phone: document.getElementById('addStuPhone').value.trim(),
+    username: document.getElementById('addStuUsername').value.trim(),
+    password: document.getElementById('addStuPassword').value,
     course: document.getElementById('addStuCourse').value,
     semester: Number(document.getElementById('addStuSemester').value),
     gender: document.getElementById('addStuGender').value
   };
 
-  if (!payload.name || !payload.email || !payload.course) {
-    showToast('Please fill all required student details.', 'error');
+  if (!payload.name || !payload.email || !payload.course || !payload.username || !payload.password) {
+    showToast('Please fill all required student details including Username and Password.', 'error');
     return;
   }
 
@@ -744,6 +882,16 @@ async function handleAddStudentSubmit(e) {
 
   if (payload.phone && !/^\d+$/.test(payload.phone)) {
     showToast('Phone number should contain only numbers.', 'error');
+    return;
+  }
+
+  if (!/^[a-zA-Z0-9]{6,10}$/.test(payload.username)) {
+    showToast('Username must be alphanumeric with 6 to 10 characters.', 'error');
+    return;
+  }
+
+  if (payload.password.length < 8 || payload.password.length > 16) {
+    showToast('Password must be between 8 and 16 characters.', 'error');
     return;
   }
 
@@ -771,6 +919,9 @@ async function handleAddStudentSubmit(e) {
 // View Student Profile Modal
 async function viewStudentModal(studentId) {
   try {
+    if (isStudentUser()) {
+      studentId = getCurrentStudentId();
+    }
     const res = await fetch(`/api/students/${studentId}`);
     const json = await res.json();
     if (!json.success) return;
@@ -1150,6 +1301,49 @@ async function handleBatchAttendanceSubmit() {
   }
 }
 
+// Handle Student First-Time / Mandatory Password Change
+async function handleChangePasswordSubmit(e) {
+  e.preventDefault();
+  const newPass = document.getElementById('changePassNew').value;
+  const confirmPass = document.getElementById('changePassConfirm').value;
+
+  if (!newPass || newPass.length < 8 || newPass.length > 16) {
+    showToast('New password must be between 8 and 16 characters long.', 'error');
+    return;
+  }
+
+  if (newPass !== confirmPass) {
+    showToast('Passwords do not match. Please re-enter carefully.', 'error');
+    return;
+  }
+
+  try {
+    const res = await fetch('/api/users/change-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        user_id: state.currentUser?.id,
+        username: state.currentUser?.username,
+        new_password: newPass
+      })
+    });
+
+    const json = await res.json();
+    if (json.success) {
+      showToast('Password updated successfully! Welcome to your dashboard.', 'success');
+      closeModal('modalChangePassword');
+      if (state.currentUser) {
+        state.currentUser.must_change_password = false;
+        localStorage.setItem('currentUser', JSON.stringify(state.currentUser));
+      }
+    } else {
+      showToast(json.message || 'Failed to update password.', 'error');
+    }
+  } catch (err) {
+    showToast('Network error while updating password.', 'error');
+  }
+}
+
 // -------------------------------------------------------------
 // 7. LINEAR REGRESSION PREDICTOR & PASS THRESHOLD
 // -------------------------------------------------------------
@@ -1274,10 +1468,12 @@ function escapeHtml(str) {
 
 // Global Event Listeners
 function setupGlobalEvents() {
-  // Modal Backdrop Click to close
+  // Modal Backdrop Click to close (disabled for modalChangePassword to prevent accidental dismissal)
   document.querySelectorAll('.modal-backdrop').forEach(modal => {
     modal.addEventListener('click', (e) => {
-      if (e.target === modal) modal.classList.remove('show');
+      if (e.target === modal && modal.id !== 'modalChangePassword') {
+        modal.classList.remove('show');
+      }
     });
   });
 
@@ -1303,3 +1499,21 @@ function setupGlobalEvents() {
   const batchDate = document.getElementById('batchAttDate');
   if (batchDate) batchDate.value = today;
 }
+
+// Password toggle helper for all password fields
+const EYE_OPEN_SVG = `<svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>`;
+const EYE_SLASH_SVG = `<svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l18 18"/></svg>`;
+
+function togglePasswordVisibility(inputId) {
+  const input = document.getElementById(inputId);
+  if (!input) return;
+  const isPass = input.type === 'password';
+  input.type = isPass ? 'text' : 'password';
+
+  const btn = input.parentElement?.querySelector('.password-toggle-btn');
+  if (btn) {
+    btn.innerHTML = isPass ? EYE_SLASH_SVG : EYE_OPEN_SVG;
+    btn.title = isPass ? 'Hide password' : 'Show password';
+  }
+}
+

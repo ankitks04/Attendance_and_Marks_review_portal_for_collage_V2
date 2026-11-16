@@ -146,10 +146,15 @@ async function initializeDatabase() {
     // Column already exists, ignore
   }
 
+  try {
+    await dbRun(`ALTER TABLE users ADD COLUMN must_change_password INTEGER DEFAULT 0`);
+  } catch (e) {
+    // Column already exists, ignore
+  }
+
   // Seed default teacher and student credentials
   await dbRun(`INSERT OR IGNORE INTO users (username, password, role, name, student_id) VALUES ('teacher', 'teacher123', 'teacher', 'Prof. A. K. Sharma', NULL)`);
   await dbRun(`INSERT OR IGNORE INTO users (username, password, role, name, student_id) VALUES ('student', 'student123', 'student', 'Aarav Sharma', 1)`);
-  await dbRun(`INSERT OR IGNORE INTO users (username, password, role, name, student_id) VALUES ('student1', 'pass123', 'student', 'John Doe', 1)`);
 
   // Check if students table is empty; if so, seed sample data
   const countRow = await dbGet(`SELECT COUNT(*) as count FROM students`);
@@ -222,7 +227,7 @@ app.post('/api/login', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Please enter both username and password.' });
     }
 
-    let query = `SELECT id, username, role, name, student_id FROM users WHERE username = ? AND password = ?`;
+    let query = `SELECT id, username, role, name, student_id, must_change_password FROM users WHERE username = ? AND password = ?`;
     const params = [username, password];
     if (role && role !== 'all') {
       query += ` AND role = ?`;
@@ -236,8 +241,18 @@ app.post('/api/login', async (req, res) => {
 
     // If student, attach student code and course
     let studentDetails = null;
-    if (user.student_id) {
-      studentDetails = await dbGet(`SELECT student_code, course, semester FROM students WHERE id = ?`, [user.student_id]);
+    let sId = user.student_id;
+    if (user.role === 'student' && !sId) {
+      const match = await dbGet(`SELECT id, student_code, course, semester FROM students WHERE name = ?`, [user.name]);
+      if (match) {
+        sId = match.id;
+        studentDetails = match;
+      } else {
+        sId = 1;
+        studentDetails = await dbGet(`SELECT student_code, course, semester FROM students WHERE id = 1`);
+      }
+    } else if (sId) {
+      studentDetails = await dbGet(`SELECT student_code, course, semester FROM students WHERE id = ?`, [sId]);
     }
 
     await logActivity('USER_LOGIN', `User ${user.name} (${user.role}) logged in successfully.`);
@@ -249,12 +264,42 @@ app.post('/api/login', async (req, res) => {
         username: user.username,
         role: user.role,
         name: user.name,
-        student_id: user.student_id,
-        student_code: studentDetails ? studentDetails.student_code : null,
+        student_id: sId,
+        student_code: studentDetails ? studentDetails.student_code : 'STU101',
         course: studentDetails ? studentDetails.course : null,
-        semester: studentDetails ? studentDetails.semester : null
+        semester: studentDetails ? studentDetails.semester : null,
+        must_change_password: Boolean(user.must_change_password)
       }
     });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Change Password API (First-time mandatory or user-initiated)
+app.post('/api/users/change-password', async (req, res) => {
+  try {
+    const { user_id, username, new_password } = req.body;
+
+    if (!new_password || new_password.length < 8 || new_password.length > 16) {
+      return res.status(400).json({ success: false, message: 'New password must be between 8 and 16 characters.' });
+    }
+
+    let user = null;
+    if (user_id) {
+      user = await dbGet(`SELECT id, username, name FROM users WHERE id = ?`, [user_id]);
+    } else if (username) {
+      user = await dbGet(`SELECT id, username, name FROM users WHERE username = ?`, [username]);
+    }
+
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User account not found.' });
+    }
+
+    await dbRun(`UPDATE users SET password = ?, must_change_password = 0 WHERE id = ?`, [new_password, user.id]);
+    await logActivity('PASSWORD_CHANGE', `Student ${user.name} (${user.username}) updated their password.`);
+
+    res.json({ success: true, message: 'Password updated successfully!' });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -290,10 +335,30 @@ app.get('/api/users/demo-credentials', (req, res) => {
 // 1. Dashboard Overview API
 app.get('/api/dashboard', async (req, res) => {
   try {
+    const { student_id, student_name, student_code } = req.query;
     const students = await dbAll(`SELECT * FROM students ORDER BY id ASC`);
     const attendance = await dbAll(`SELECT * FROM attendance`);
     const marks = await dbAll(`SELECT * FROM marks`);
-    const activities = await dbAll(`SELECT * FROM activity_log ORDER BY id DESC LIMIT 6`);
+
+    let activities;
+    if (student_name || student_code) {
+      const conditions = [];
+      const actParams = [];
+      if (student_name) {
+        conditions.push(`LOWER(description) LIKE ?`);
+        actParams.push(`%${student_name.trim().toLowerCase()}%`);
+      }
+      if (student_code) {
+        conditions.push(`LOWER(description) LIKE ?`);
+        actParams.push(`%${student_code.trim().toLowerCase()}%`);
+      }
+      activities = await dbAll(
+        `SELECT * FROM activity_log WHERE ${conditions.join(' OR ')} ORDER BY id DESC LIMIT 10`,
+        actParams
+      );
+    } else {
+      activities = await dbAll(`SELECT * FROM activity_log ORDER BY id DESC LIMIT 6`);
+    }
 
     const analytics = computeComprehensiveAnalytics(students, attendance, marks, 40);
 
@@ -427,10 +492,14 @@ app.get('/api/students/:id', async (req, res) => {
 // Create New Student
 app.post('/api/students', async (req, res) => {
   try {
-    const { student_code, name, email, phone, course, semester, gender } = req.body;
+    const { student_code, name, email, phone, username, password, course, semester, gender } = req.body;
 
     if (!name || !email || !course || !semester) {
       return res.status(400).json({ success: false, message: 'Name, Email, Course, and Semester are required.' });
+    }
+
+    if (!username || !password) {
+      return res.status(400).json({ success: false, message: 'Username and Password are required.' });
     }
 
     if (!/^[a-zA-Z\s]+$/.test(name.trim())) {
@@ -439,6 +508,21 @@ app.post('/api/students', async (req, res) => {
 
     if (phone && phone.trim() !== '' && !/^\d+$/.test(phone.trim())) {
       return res.status(400).json({ success: false, message: 'Phone number must contain only numeric values.' });
+    }
+
+    const trimmedUsername = username.trim();
+    if (!/^[a-zA-Z0-9]{6,10}$/.test(trimmedUsername)) {
+      return res.status(400).json({ success: false, message: 'Username must be alphanumeric with 6 to 10 characters.' });
+    }
+
+    if (password.length < 8 || password.length > 16) {
+      return res.status(400).json({ success: false, message: 'Password must be between 8 and 16 characters.' });
+    }
+
+    // Check duplicate username in users table
+    const existingUser = await dbGet(`SELECT id FROM users WHERE username = ?`, [trimmedUsername]);
+    if (existingUser) {
+      return res.status(400).json({ success: false, message: `Username "${trimmedUsername}" is already taken. Please choose another.` });
     }
 
     // Auto-generate student code if omitted
@@ -460,9 +544,17 @@ app.post('/api/students', async (req, res) => {
       [finalCode, name, email, phone || '', course, Number(semester), gender || 'Other']
     );
 
-    await logActivity('STUDENT_ADD', `Added student ${name} (${finalCode}) in ${course} Sem-${semester}.`);
+    const newStudentId = result.lastID;
 
-    res.json({ success: true, id: result.lastID, message: 'Student added successfully!' });
+    // Create student login credential in users table (flagged for mandatory first-time password change)
+    await dbRun(
+      `INSERT INTO users (username, password, role, name, student_id, must_change_password) VALUES (?, ?, 'student', ?, ?, 1)`,
+      [trimmedUsername, password, name.trim(), newStudentId]
+    );
+
+    await logActivity('STUDENT_ADD', `Added student ${name} (${finalCode}) with login account "${trimmedUsername}".`);
+
+    res.json({ success: true, id: newStudentId, message: 'Student and login credentials added successfully!' });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -515,9 +607,10 @@ app.delete('/api/students/:id', async (req, res) => {
       return res.status(404).json({ success: false, message: 'Student not found.' });
     }
 
-    // Cascade delete marks and attendance
+    // Cascade delete marks, attendance, and student user credentials
     await dbRun(`DELETE FROM attendance WHERE student_id = ?`, [studentId]);
     await dbRun(`DELETE FROM marks WHERE student_id = ?`, [studentId]);
+    await dbRun(`DELETE FROM users WHERE student_id = ?`, [studentId]);
     await dbRun(`DELETE FROM students WHERE id = ?`, [studentId]);
 
     await logActivity('STUDENT_DELETE', `Deleted student ${student.name} (${student.student_code}).`);

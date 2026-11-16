@@ -228,10 +228,10 @@
 
         <div class="form-group">
           <label for="passwordInput">Password</label>
-          <div style="position: relative;">
-            <input type="password" id="passwordInput" class="input-control" placeholder="Enter your password" required autocomplete="current-password">
-            <button type="button" onclick="togglePasswordVisibility()" style="position: absolute; right: 12px; top: 50%; transform: translateY(-50%); background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 12px; font-weight: 600;">
-              Show
+          <div class="password-input-wrapper" style="position: relative;">
+            <input type="password" id="passwordInput" class="input-control" placeholder="Enter your password" required autocomplete="current-password" style="padding-right: 40px;">
+            <button type="button" class="password-toggle-btn" onclick="togglePasswordVisibility('passwordInput')" title="Show password" style="position: absolute; right: 12px; top: 50%; transform: translateY(-50%); background: none; border: none; color: var(--text-muted); cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 4px;">
+              <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>
             </button>
           </div>
         </div>
@@ -294,7 +294,7 @@
         tabStudent.classList.add('active');
         tabTeacher.classList.remove('active');
         labelUser.innerText = 'Student Roll No / Username';
-        userInput.placeholder = 'e.g. student or student1';
+        userInput.placeholder = 'e.g. student';
         submitBtn.innerHTML = '<span>Sign In as Student</span>';
         submitBtn.className = 'btn btn-orange';
       }
@@ -308,12 +308,19 @@
       hideAlert();
     }
 
-    function togglePasswordVisibility() {
-      const pass = document.getElementById('passwordInput');
-      if (pass.type === 'password') {
-        pass.type = 'text';
-      } else {
-        pass.type = 'password';
+    const EYE_OPEN_SVG = `<svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>`;
+    const EYE_SLASH_SVG = `<svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l18 18"/></svg>`;
+
+    function togglePasswordVisibility(inputId = 'passwordInput') {
+      const pass = document.getElementById(inputId);
+      if (!pass) return;
+      const isPass = pass.type === 'password';
+      pass.type = isPass ? 'text' : 'password';
+
+      const btn = pass.parentElement?.querySelector('.password-toggle-btn');
+      if (btn) {
+        btn.innerHTML = isPass ? EYE_SLASH_SVG : EYE_OPEN_SVG;
+        btn.title = isPass ? 'Hide password' : 'Show password';
       }
     }
 
