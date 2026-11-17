@@ -1370,6 +1370,19 @@ body.role-student .action-buttons .btn-icon-action[title*="Edit"] {
   display: none !important;
 }
 
+body.role-student .profile-pill {
+  cursor: pointer !important;
+  transition: all 0.2s ease;
+  user-select: none;
+}
+
+body.role-student .profile-pill:hover {
+  background-color: #FFFFFF;
+  border-color: var(--green-primary);
+  box-shadow: 0 2px 10px rgba(21, 128, 61, 0.18);
+  transform: translateY(-1px);
+}
+
 /* =============================================================
    13. REMOVED / HIDDEN VIEWS (TEACHER & STUDENT LOGIN)
    ============================================================= */

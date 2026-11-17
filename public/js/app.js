@@ -67,11 +67,24 @@ function initUserSession() {
       avatarEl.innerText = initials || 'US';
     }
 
-    // If logged in as student, personalize banner
+    // If logged in as student, personalize banner and enable profile pill click
     if (user.role === 'student') {
       const subtitle = document.querySelector('.banner-content p');
       if (subtitle) {
         subtitle.innerHTML = `Welcome back, <strong>${escapeHtml(user.name)}</strong>! Viewing your academic performance & attendance portfolio (View-Only Mode).`;
+      }
+      const pill = document.getElementById('profilePill');
+      if (pill) {
+        pill.title = 'Click to view your profile';
+        pill.setAttribute('role', 'button');
+        pill.setAttribute('aria-label', 'View Profile');
+        pill.setAttribute('tabindex', '0');
+        pill.onkeydown = (e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            handleProfilePillClick();
+          }
+        };
       }
       // Mandatory first-time password change prompt
       if (user.must_change_password) {
@@ -80,6 +93,12 @@ function initUserSession() {
         }, 350);
       }
     }
+  }
+}
+
+function handleProfilePillClick() {
+  if (isStudentUser()) {
+    viewStudentModal(getCurrentStudentId());
   }
 }
 
