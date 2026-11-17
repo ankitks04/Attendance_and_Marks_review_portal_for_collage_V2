@@ -5,6 +5,7 @@
 const state = {
   currentPage: 'dashboard',
   students: [],
+  allStudents: [],
   attendanceRecords: [],
   studentSummary: [],
   marksRecords: [],
@@ -20,6 +21,7 @@ document.addEventListener('DOMContentLoaded', () => {
   setupNavigation();
   setupGlobalEvents();
   loadCurrentPageData();
+  ensureStudentsLoaded();
 });
 
 function isStudentUser() {
@@ -190,9 +192,11 @@ function loadCurrentPageData() {
       fetchStudents();
       break;
     case 'attendance':
+      ensureStudentsLoaded();
       fetchAttendance();
       break;
     case 'marks':
+      ensureStudentsLoaded();
       fetchMarks();
       break;
     case 'analytics':
@@ -215,6 +219,7 @@ async function fetchDashboardData() {
       if (state.currentUser?.name) params.set('student_name', state.currentUser.name);
       if (state.currentUser?.student_code) params.set('student_code', state.currentUser.student_code);
       if (state.currentUser?.student_id) params.set('student_id', state.currentUser.student_id);
+      if (state.currentUser?.username) params.set('student_username', state.currentUser.username);
       const qs = params.toString();
       if (qs) dashboardUrl += '?' + qs;
     }
@@ -287,11 +292,12 @@ async function fetchDashboardData() {
       const myCode = (state.currentUser.student_code || '').trim().toLowerCase();
       const myUser = (state.currentUser.username || '').trim().toLowerCase();
       const myActivities = (recentActivities || []).filter(a => {
+        if (a.action_type === 'STUDENT_DELETE') return false;
         const desc = (a.description || '').toLowerCase();
         const matchesName = myName && desc.includes(myName);
-        const matchesCode = myCode && desc.includes(myCode);
         const matchesUser = myUser && myUser !== 'student' && (desc.includes(`(${myUser})`) || desc.includes(`"${myUser}"`));
-        return Boolean(matchesName || matchesCode || matchesUser);
+        // Match strictly by student's name or username to prevent seeing deleted students who had the same student_code
+        return Boolean(matchesName || matchesUser);
       });
       renderRecentActivitiesTable(myActivities);
 
@@ -421,8 +427,13 @@ async function fetchStudents() {
 
     renderStudentsTable(state.students);
 
-    // Populate student dropdowns in marks/attendance modals
-    populateStudentDropdowns(state.students);
+    // If search/filter is neutral, update allStudents cache
+    if ((!search || search.trim() === '') && course === 'All' && semester === 'All' && status === 'All' && !isStudentUser()) {
+      state.allStudents = json.data;
+    }
+
+    // Populate student dropdowns in marks/attendance modals using all available students
+    populateStudentDropdowns((state.allStudents && state.allStudents.length > 0) ? state.allStudents : state.students);
   } catch (err) {
     console.error('Error fetching students:', err);
   }
@@ -846,12 +857,34 @@ function renderAttentionStudentsList(students) {
 // -------------------------------------------------------------
 // 6. MODALS & FORMS HANDLING
 // -------------------------------------------------------------
-function openModal(modalId) {
+async function ensureStudentsLoaded(force = false) {
+  if (force || !state.allStudents || state.allStudents.length === 0) {
+    try {
+      const res = await fetch('/api/students');
+      const json = await res.json();
+      if (json.success && Array.isArray(json.data)) {
+        state.allStudents = json.data;
+        if (!state.students || state.students.length === 0) {
+          state.students = json.data;
+        }
+      }
+    } catch (err) {
+      console.error('Error loading students for dropdowns:', err);
+    }
+  }
+  populateStudentDropdowns(state.allStudents);
+  return state.allStudents;
+}
+
+async function openModal(modalId) {
   if (state.currentUser && state.currentUser.role === 'student') {
     if (['modalAddStudent', 'modalEditStudent', 'modalAddMarks', 'modalSingleAttendance', 'modalBatchAttendance'].includes(modalId)) {
       showToast('Student accounts have view-only rights.', 'warning');
       return;
     }
+  }
+  if (modalId === 'modalSingleAttendance' || modalId === 'modalAddMarks') {
+    await ensureStudentsLoaded();
   }
   const modal = document.getElementById(modalId);
   if (modal) modal.classList.add('show');
@@ -863,13 +896,16 @@ function closeModal(modalId) {
 }
 
 function populateStudentDropdowns(students) {
+  const list = (students && students.length > 0)
+    ? students
+    : ((state.allStudents && state.allStudents.length > 0) ? state.allStudents : state.students);
   const selects = ['marksStudentSelect', 'attSingleStudentSelect'];
   selects.forEach(id => {
     const el = document.getElementById(id);
     if (!el) return;
     const currentVal = el.value;
-    el.innerHTML = '<option value="">-- Select Student --</option>' +
-      students.map(s => `<option value="${s.id}">${s.student_code} - ${escapeHtml(s.name)} (${s.course})</option>`).join('');
+    el.innerHTML = '<option value="">-- Choose Student --</option>' +
+      (list || []).map(s => `<option value="${s.id}">${s.student_code} - ${escapeHtml(s.name)} (${s.course})</option>`).join('');
     if (currentVal) el.value = currentVal;
   });
 }
@@ -925,6 +961,7 @@ async function handleAddStudentSubmit(e) {
       showToast('Student registered successfully!', 'success');
       closeModal('modalAddStudent');
       document.getElementById('formAddStudent').reset();
+      await ensureStudentsLoaded(true);
       fetchStudents();
       fetchDashboardData();
     } else {
@@ -1060,6 +1097,7 @@ async function handleEditStudentSubmit(e) {
     if (json.success) {
       showToast('Student updated successfully!', 'success');
       closeModal('modalEditStudent');
+      await ensureStudentsLoaded(true);
       fetchStudents();
       fetchDashboardData();
     } else {
@@ -1085,6 +1123,7 @@ async function deleteStudent(studentId, studentName) {
     const json = await res.json();
     if (json.success) {
       showToast(`Student ${studentName} deleted.`, 'success');
+      await ensureStudentsLoaded(true);
       fetchStudents();
       fetchDashboardData();
     } else {
@@ -1215,18 +1254,20 @@ async function deleteAttendance(id) {
 }
 
 // Batch Attendance Sheet
-function openBatchAttendanceModal() {
+async function openBatchAttendanceModal() {
   const dateInput = document.getElementById('batchAttDate');
-  if (!dateInput.value) {
+  if (dateInput && !dateInput.value) {
     dateInput.value = new Date().toISOString().split('T')[0];
   }
+  await ensureStudentsLoaded();
   populateBatchAttendanceGrid();
   openModal('modalBatchAttendance');
 }
 
 function populateBatchAttendanceGrid() {
   const courseFilter = document.getElementById('batchAttCourseFilter')?.value || 'All';
-  let filtered = state.students;
+  const source = (state.allStudents && state.allStudents.length > 0) ? state.allStudents : state.students;
+  let filtered = source || [];
   if (courseFilter !== 'All') {
     filtered = filtered.filter(s => s.course === courseFilter);
   }
@@ -1419,6 +1460,7 @@ async function resetSampleData() {
     const json = await res.json();
     if (json.success) {
       showToast('Sample dataset restored successfully!', 'success');
+      await ensureStudentsLoaded(true);
       loadCurrentPageData();
     }
   } catch (err) {
@@ -1439,6 +1481,9 @@ async function clearAllData() {
     const json = await res.json();
     if (json.success) {
       showToast('All records cleared.', 'warning');
+      state.allStudents = [];
+      state.students = [];
+      populateStudentDropdowns([]);
       loadCurrentPageData();
     }
   } catch (err) {

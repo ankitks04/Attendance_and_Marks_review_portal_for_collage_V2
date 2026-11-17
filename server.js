@@ -335,27 +335,52 @@ app.get('/api/users/demo-credentials', (req, res) => {
 // 1. Dashboard Overview API
 app.get('/api/dashboard', async (req, res) => {
   try {
-    const { student_id, student_name, student_code } = req.query;
+    const { student_id, student_name, student_code, student_username } = req.query;
     const students = await dbAll(`SELECT * FROM students ORDER BY id ASC`);
     const attendance = await dbAll(`SELECT * FROM attendance`);
     const marks = await dbAll(`SELECT * FROM marks`);
 
     let activities;
-    if (student_name || student_code) {
-      const conditions = [];
+    if (student_id || student_name || student_code || student_username) {
+      let stuRecord = null;
+      if (student_id) {
+        stuRecord = await dbGet(`SELECT * FROM students WHERE id = ?`, [student_id]);
+      }
+      if (!stuRecord && student_code) {
+        stuRecord = await dbGet(`SELECT * FROM students WHERE student_code = ?`, [student_code]);
+      }
+      if (!stuRecord && student_name) {
+        stuRecord = await dbGet(`SELECT * FROM students WHERE LOWER(name) = ?`, [student_name.trim().toLowerCase()]);
+      }
+
+      const sName = stuRecord ? stuRecord.name : (student_name || '');
+      const sCode = stuRecord ? stuRecord.student_code : (student_code || '');
+      const sUser = student_username || '';
+      const createdAt = stuRecord ? stuRecord.created_at : null;
+
+      let sql = `SELECT * FROM activity_log WHERE action_type != 'STUDENT_DELETE'`;
       const actParams = [];
-      if (student_name) {
-        conditions.push(`LOWER(description) LIKE ?`);
-        actParams.push(`%${student_name.trim().toLowerCase()}%`);
+
+      // Filter by student name or username to prevent seeing logs of deleted students who previously shared the same student_code
+      if (sName && sUser && sUser !== 'student') {
+        sql += ` AND (LOWER(description) LIKE ? OR LOWER(description) LIKE ?)`;
+        actParams.push(`%${sName.trim().toLowerCase()}%`, `%${sUser.trim().toLowerCase()}%`);
+      } else if (sName) {
+        sql += ` AND LOWER(description) LIKE ?`;
+        actParams.push(`%${sName.trim().toLowerCase()}%`);
+      } else if (sCode) {
+        sql += ` AND LOWER(description) LIKE ?`;
+        actParams.push(`%${sCode.trim().toLowerCase()}%`);
       }
-      if (student_code) {
-        conditions.push(`LOWER(description) LIKE ?`);
-        actParams.push(`%${student_code.trim().toLowerCase()}%`);
+
+      if (createdAt) {
+        // Exclude logs prior to this student account being created
+        sql += ` AND timestamp >= datetime(?, '-1 minute')`;
+        actParams.push(createdAt);
       }
-      activities = await dbAll(
-        `SELECT * FROM activity_log WHERE ${conditions.join(' OR ')} ORDER BY id DESC LIMIT 10`,
-        actParams
-      );
+
+      sql += ` ORDER BY id DESC LIMIT 10`;
+      activities = await dbAll(sql, actParams);
     } else {
       activities = await dbAll(`SELECT * FROM activity_log ORDER BY id DESC LIMIT 6`);
     }
